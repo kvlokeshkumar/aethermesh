@@ -1,0 +1,528 @@
+================================================================================
+AETHERMESH - PROJECT KNOWLEDGE BASE
+================================================================================
+Written from direct reading of the code in this repository (branch my-changes,
+snapshot dated 2026-10-29). Where the code and the older docs (README.md,
+PROJECT_SUMMARY.md) disagree, THE CODE WAS TREATED AS TRUTH and the discrepancy
+is listed in section 10. Anything I could not determine is in section 12
+("Open questions"). Nothing here is guessed.
+
+Secrets: this file contains variable NAMES only, never values.
+
+
+--------------------------------------------------------------------------------
+1. PROJECT OVERVIEW
+--------------------------------------------------------------------------------
+Name: AetherMesh ("Adaptive Multi-Agent AI Runtime Kernel").
+Origin: hackathon entry, team "Ctrl Alt Defeat" (Advaith Suriyanarayanan,
+K V Lokesh Kumar, Viswa Danuskka, Sinduja U V) - per README.md.
+
+Purpose: run a pipeline of specialised AI agents against a free-text task, watch
+the run live, and let a rule-based "policy engine" MUTATE the pipeline mid-run
+(add / remove / replace a step) when quality signals look bad, instead of
+failing silently. Every decision is recorded as a structured event so a run can
+be replayed and audited afterwards.
+
+Problem solved: multi-agent LLM pipelines are brittle; one low-confidence or
+contradictory step compounds silently. AetherMesh monitors confidence,
+contradictions, missing repository, number of sources, and elapsed time after
+every agent, and reacts.
+
+Target users: hackathon judges / developers who want to see an observable,
+self-adapting agent pipeline. Not production-hardened (see section 10).
+
+Status (as of this snapshot): working demo. Backend + frontend run locally.
+Works with NO Gemini key (every Gemini-backed agent has a deterministic local
+fallback), so the demo is runnable offline. Several features advertised in
+README.md are only partially implemented (human-in-the-loop approval, some
+specialist agents) - see section 10.
+
+
+--------------------------------------------------------------------------------
+2. TECH STACK
+--------------------------------------------------------------------------------
+Backend (Python 3.10+ per README; developed/tested here on Python 3.12.10)
+  fastapi==0.116.1
+  uvicorn[standard]==0.35.0
+  pydantic==2.11.7, pydantic-settings==2.10.1
+  python-dotenv==1.1.1
+  networkx>=3.2,<4          (USED: workflow DAG validation / ordering)
+  sse-starlette==3.0.2      (Server-Sent Events)
+  google-genai==1.29.0      (Gemini SDK)
+  httpx==0.28.1
+  python-multipart==0.0.20
+  Test deps (NOT in requirements.txt): pytest (+ httpx for TestClient)
+  Database: SQLite via stdlib sqlite3 (file backend/aethermesh.db)
+
+Frontend (Node 18+ per README; npm; node v25.8.1 / npm 11.11.1 on this machine)
+  react ^18.3.1, react-dom ^18.3.1, react-router-dom ^6.28.0
+  zustand ^5.0.2 (state), dayjs ^1.11.13
+  @xyflow/react ^12.3.6 (React Flow graph)
+  vite ^6.0.5, @vitejs/plugin-react ^4.3.4
+  tailwindcss ^4.0.0 + @tailwindcss/vite ^4.0.0
+  typescript ^5.9.3 (strict, noUnusedLocals/Parameters)
+  eslint ^9.16.0 + typescript-eslint 8.18 + react-hooks + react-refresh plugins
+  Exact versions are pinned in frontend/package-lock.json.
+
+External service: Google Gemini API (default model gemini-2.5-flash). Optional.
+Hardware/OS: nothing special; no GPU; no trained models. Developed on Windows
+11 (a .DS_Store in the repo shows a macOS teammate too).
+
+
+--------------------------------------------------------------------------------
+3. FOLDER STRUCTURE
+--------------------------------------------------------------------------------
+/
+  README.md                 Project README (features, mermaid diagram, quick
+                            start). Has a pointer to this file at the top.
+  PROJECT_SUMMARY.md        Older hand-written summary. PARTLY OUTDATED (sec 10).
+  PROJECT_KNOWLEDGE.txt     This file.
+  .gitignore                Ignores .env*, venv, node_modules, dist, *.db, caches
+  backend/
+    app.py                  FastAPI app, CORS (allow all origins), /ping
+    config.py               pydantic-settings Settings, reads backend/.env
+    requirements.txt        Python deps
+    .env.example            Template for env vars (placeholders only)
+    aethermesh.db           SQLite file, created at runtime (git-ignored)
+    api/
+      routes.py             ALL HTTP endpoints (see section 4/9)
+      schemas.py            TaskRequest{task}, HealthResponse{status,version}
+    runtime/
+      engine.py             RuntimeEngine.execute(): the main execution loop
+      state_manager.py      Only component allowed to mutate ExecutionState
+      policy_engine.py      Runs every policy, collects non-NONE decisions
+      decision_engine.py    Picks highest-priority decision
+      mutation_engine.py    Applies ADD/REMOVE/REPLACE after DAG-cycle check
+      workflow_graph.py     networkx helpers: build_graph, is_valid_dag,
+                            topological_order, next_ready_node, node-link JSON
+      event_logger.py       Records RuntimeEvents, in-memory store + live
+                            listeners (used for SSE)
+      replay.py             ReplayReader: rebuilds history from logged events
+    policies/
+      base_policy.py        Abstract BasePolicy.evaluate(state)->RuntimeDecision
+      low_confidence.py, missing_repo.py, contradiction.py, low_sources.py,
+      execution_timeout.py  The five policies
+      replay.py             Empty placeholder (replay moved to runtime/replay.py)
+    agents/
+      base_agent.py         Abstract BaseAgent.run(node)->AgentResult
+      registry.py           AgentRegistry (type string -> agent instance)
+      context_utils.py      format_shared_context, excerpt, KEY: value parsers
+      planner_agent.py, researcher_agent.py, evaluator_agent.py,
+      critic_agent.py       Gemini-backed with local fallback
+      coder_agent.py, reviewer_agent.py   Always local/deterministic
+      security_agent.py, sandbox_runner.py, debugger_agent.py,
+      optimizer_agent.py, summarizer_agent.py, analyst_agent.py
+                            Specialist agents (see section 6 for what they do)
+    models/                 Pydantic models: node, workflow, execution, event,
+                            runtime_decision, agent_result
+    services/
+      bootstrap.py          Composition root: builds singletons (registry,
+                            gemini_client, event_logger, workflow_generator)
+      gemini_client.py      Gemini wrapper: retries, 429 cooldown
+      workflow_generator.py Task -> Workflow (1 Gemini call, fallback default)
+      github_service.py     EMPTY FILE
+    database/db.py          SQLite helpers: init_db, save_run, get_all_runs,
+                            get_run_by_id (note: database/__init__.py re-exports)
+    utils/                  helpers.py, logger.py, prompts.py (prompts.py is
+                            EMPTY, 0 bytes; helpers/logger are trivial)
+    tests/                  pytest suite (see section 6)
+  frontend/
+    package.json, package-lock.json, vite.config.ts (dev port 5173),
+    tsconfig*.json, eslint.config.js, index.html
+    .env.example            VITE_USE_MOCKS, VITE_API_BASE (placeholders)
+    src/
+      main.tsx, App.tsx     Entry + routes
+      index.css             Tailwind v4 @theme tokens, animations
+      api/                  client.ts (fetch calls), events.ts (EventSource +
+                            mock stream), runtime.ts (env flags)
+      store/runtimeStore.ts Zustand store of the current ExecutionState
+      hooks/                useEvents (live run driver), useReplay, useRuntime
+      lib/                  workflowEvents.ts (fold events into workflow),
+                            pastRunsStore.ts (localStorage run history)
+      types/                event.ts, runtime.ts, workflow.ts
+      mocks/executionState.ts Mock fixtures for mock mode
+      pages/                Dashboard, Prompt, Run, PastRuns, Policy, Logs,
+                            Timeline, Replay, About, WorkflowGraph (NOT routed)
+      components/           chat/, common/, sidebar/, workflow/ (UI pieces)
+
+
+--------------------------------------------------------------------------------
+4. ARCHITECTURE AND END-TO-END WORKFLOW
+--------------------------------------------------------------------------------
+Live-run path (what the UI uses):
+
+ 1. User types a task on /prompt -> frontend useEvents.simulateLiveRun(task).
+ 2. Frontend POST {API_BASE}/execute/start {"task": "..."}.
+ 3. Backend (routes.start_execute):
+      a. WorkflowGenerator.generate(task): ONE Gemini call returns DOMAIN,
+         ARTIFACT_TYPE and a JSON array of nodes. On any failure (no key,
+         rate limit, parse error) -> hard-coded domain-aware default workflow
+         (keyword matching, see 6.4).
+      b. Creates ExecutionState; stores it in the in-memory dict
+         _running_states[workflow.id].
+      c. Starts RuntimeEngine.execute in a background asyncio task
+         (asyncio.to_thread) and returns {workflow_id, workflow} immediately.
+ 4. Frontend opens EventSource on GET /execute/{id}/stream (SSE).
+    Backend registers a listener on the EventLogger BEFORE snapshotting past
+    events (avoids a lost-event race), replays already-logged events, then
+    streams new ones; de-dupes by event id; closes after workflow_completed.
+    Each SSE message = {"event": RuntimeEvent, "state": snapshot}.
+ 5. Frontend queues payloads and applies one every 700 ms (LIVE_STEP_MS) so the
+    UI is readable; updates the Zustand store; Run page redraws the flow.
+ 6. When done, frontend saves the run to localStorage (pastRunsStore).
+
+RuntimeEngine.execute loop (backend/runtime/engine.py):
+   start_execution -> workflow_started event
+   while workflow.has_next():
+     node = next_ready_node(workflow)      # first PENDING/READY node in
+                                           # networkx topological order
+     sleep(GEMINI_AGENT_DELAY_SECONDS)     # default 2.0 s, throttles API use
+     prepare node: deep-copy, inject shared_context (outputs of earlier agents
+        keyed by agent_type); coder/reviewer/evaluator also get "context";
+        reviewer/evaluator get "artifact" (coder output, else plan)
+     mark active; agent_started event
+     run agent via registry. If it raises: mark failed, agent_completed(failed)
+        event, continue (the run does NOT abort).
+     shared_context[agent_type] = result.answer
+     StateManager.apply_agent_result: updates confidence, repository_found,
+        contradiction_score, sources, final_output
+     set execution_time (wall clock since start)
+     _evaluate_and_mutate: PolicyEngine.evaluate -> DecisionEngine.select (max
+        priority; ONE decision per node) -> policy_triggered event ->
+        MutationEngine.apply -> node_added / node_removed / node_replaced event.
+        If the mutation would create a cycle it is REJECTED and a
+        policy_triggered event with details.rejected=true is logged.
+     mark node completed; agent_completed event
+   complete_execution -> workflow_completed event.
+
+Policies (all read state only; each guards against re-adding its own node via
+node.metadata["reason"]):
+   name                    trigger                                 action            prio
+   ExecutionTimeoutPolicy  metrics.execution_time > timeout        REMOVE current    4
+                           (default 120 s - see 10)                node
+   MissingRepoPolicy       repository_found == False               ADD researcher    3
+                                                                   "Repository search"
+   LowConfidencePolicy     completed_agents>0 and confidence<0.4   ADD researcher    2
+   ContradictionPolicy     contradiction_score > 0.6               ADD evaluator     2
+   LowSourcesPolicy        completed_agents>0 and sources < 3      ADD researcher    1
+Added nodes get an edge from workflow.current_node to the new node.
+
+Other endpoints: blocking POST /execute (runs to completion, saves to SQLite),
+GET /replay/{id}, GET /history, GET /workflow/{id}/graph, POST
+/execute/{id}/approve, GET /execute/{id}, GET /, /health, /ping, /docs.
+
+
+--------------------------------------------------------------------------------
+5. DATASETS
+--------------------------------------------------------------------------------
+There are NO datasets, notebooks or trained models in this project. Nothing was
+downloaded and no training happens.
+
+Data the app itself creates at runtime:
+  backend/aethermesh.db (SQLite, git-ignored, ~20 KB when inspected)
+    table runs   (id TEXT PK, task, status, confidence REAL, mutations INT,
+                  started_at TEXT, state_json TEXT)  one row per saved run
+    table events (id TEXT PK, workflow_id, timestamp, event_type, reason,
+                  details_json)
+  Only POST /execute and the HITL approve endpoint write to it (see 10).
+  Browser localStorage key "aethermesh_past_runs_v1" holds the UI's run history.
+  The DB is regenerable/disposable; it only contains past demo runs.
+
+
+--------------------------------------------------------------------------------
+6. IMPLEMENTATION DETAILS
+--------------------------------------------------------------------------------
+6.1 Models (backend/models)
+  WorkflowNode{id uuid, name, agent_type, status, metadata}
+     status in pending|ready|active|completed|failed|skipped
+  Workflow{id, nodes, edges[{source,target}], current_node, history}
+     methods add_node, add_edge, remove_node (also drops its edges),
+     replace_node (re-points edges), mark_running/completed/failed/ready, reset
+  ExecutionState{task, status, workflow, confidence, repository_found=True,
+     contradiction_score, sources, final_output, events, metrics}
+     status: idle|running|completed|failed|paused_for_approval
+  ExecutionMetrics{execution_time, mutations, completed_agents, failed_agents,
+     confidence}
+  RuntimeEvent{id, timestamp(UTC), event_type, reason, details}
+     event_type: workflow_started, agent_started, agent_completed, node_added,
+     node_removed, node_replaced, policy_triggered, workflow_completed
+  RuntimeDecision{action none|add|remove|replace, target_node, new_node,
+     reason, policy_name, priority>=0, metadata}
+  AgentResult{answer, confidence, metadata}
+
+6.2 StateManager.apply_agent_result
+  Confidence = running mean of all agent confidences so far (rounded 2dp),
+  EXCEPT: reviewer/evaluator with metadata["score"] use that score; evaluator
+  without it uses its own confidence. repository_found / contradiction_score /
+  sources are overwritten only if the agent result carries those metadata keys.
+  final_output is overwritten by coder, summarizer, analyst, security_auditor,
+  optimizer, debugger, sandbox_runner results, or if still empty.
+
+6.3 Agents
+  planner (Gemini, temp 0.2): structured KEY: value output (PLAN, DOMAIN,
+     TASK_TYPE, COMPLEXITY, REQUIRES_*, REQUIRED_AGENTS, STEPS, CONFIDENCE).
+     Fallback confidence 0.65.
+  researcher (Gemini, temp 0.25): SUMMARY/FACTS/ASSUMPTIONS/UNKNOWNS/
+     CONFLICTING_EVIDENCE/MISSING_INFORMATION/SOURCES/CONTRADICTION_SCORE/
+     CONFIDENCE. Fallback: fixed text, confidence 0.58, sources=1,
+     contradiction 0.0, repository_found True. NOTE the fallback gives sources=1
+     (<3) and confidence 0.58, so in offline mode LowSourcesPolicy fires.
+  evaluator (Gemini, temp 0.1): six scores + OVERALL_CONFIDENCE. Fallback is a
+     heuristic formula over artifact length, number of prior agents, presence
+     of plan/research, code fences, TODOs.
+  critic (Gemini temp 0.15, 200 lines): adversarial reviewer. Registered, only
+     added by the default-workflow generator when the task contains
+     challenge/critic/hallucination/assumption/probe. (bootstrap.py comment
+     says "NOT yet integrated" but the generator does add it - stale comment.)
+  coder: NEVER calls Gemini. Builds a markdown scaffold from plan+research
+     (FastAPI stub if artifact_type has "api"/"rest", React stub if
+     "react"/"component", else a prose outline). Confidence 0.68-0.96.
+  reviewer: NEVER calls Gemini. Heuristic checks (short text, no "## Task",
+     TODO) -> APPROVE if <=1 issue else REQUEST_CHANGES. Confidence
+     max(0.60, 0.95-0.12*issues).
+  security_auditor, sandbox_runner: return TEMPLATE text that always says
+     "PASSED / SUCCESS / 0 errors". They do NOT scan or execute anything.
+     Confidence derived from task length. (Verified by reading the code.)
+  debugger, optimizer, summarizer, analyst: exist and are registered; I did not
+     read them in full - see Open questions.
+  Rate limiting (GeminiClient): up to 3 attempts, sleeps 2s then 4s on 429/
+  RESOURCE_EXHAUSTED; after exhausting, sets a class-wide cooldown
+  (GEMINI_RATE_LIMIT_COOLDOWN_SECONDS, 60 s) during which all agents skip Gemini
+  and use local fallbacks. A key equal to YOUR_API_KEY / YOUR_GEMINI_API_KEY is
+  treated as "no key".
+
+6.4 Default workflow (no Gemini) - keyword buckets on the lowercased task:
+  security words (security, audit, vulnerability, iam, s3, key, express, sql,
+     terraform)        -> Planner, Researcher, Security Auditor, Coder,
+                          Sandbox Runner, [Critic], Reviewer, Evaluator
+  perf words (memory, leak, goroutine, race, benchmark, optimize, golang, grpc)
+                       -> Planner, Researcher, Optimizer, Coder, Sandbox
+                          Runner, [Critic], Reviewer, Evaluator
+  general words (analysis, risk, trade-off, postmortem, strategy, report,
+     serverless)       -> Planner, Researcher, Analyst, Summarizer, ...
+  otherwise            -> Planner, Researcher, Coder, ...
+  Critic is inserted if the task has challenge/critic/hallucination/assumption/
+  probe. Nodes are chained linearly with edges.
+  Substring matching is crude (e.g. "key", "race", "s3" match inside other
+  words).
+
+6.5 Graph logic (workflow_graph.py): build_graph makes a throwaway
+  networkx.DiGraph from the Pydantic Workflow (Pydantic model stays the source
+  of truth). MutationEngine simulates each mutation on a deepcopy and rejects
+  it if the result is not a DAG.
+
+6.6 Frontend
+  Routes in App.tsx: / Dashboard, /prompt, /run, /runs (PastRuns), /policy,
+  /logs, /timeline, /replay, /about. pages/WorkflowGraph.tsx exists but is NOT
+  routed in App.tsx. Header.tsx is the 224px left sidebar.
+  Mock mode: VITE_USE_MOCKS === 'true' replays mocks/executionState.ts on a
+  1200 ms timer. Default (unset/anything else) = REAL backend mode.
+  PastRuns merges: localStorage runs + GET /history + mock runs, de-duplicated
+  by id OR identical task text.
+  Run page has Approve/Abort buttons wired to POST /execute/{id}/approve and
+  shown when status == 'paused_for_approval'.
+  Styling: monochrome Tailwind v4 theme (CSS variables in index.css), mono font
+  for data, dark docked event-log panel.
+
+6.7 Tests (backend/tests, pytest)
+  test_api.py            health, root, /execute + /replay round trip
+  test_backend.py        engine execution and replay
+  test_policy_recovery.py ScriptedAgent-driven tests for each of the 4 recovery
+                          policies (decision shape + end-to-end) and a happy
+                          path with no policy firing
+  test_workflow_graph.py topological order, valid mutation, cycle rejection,
+                          node-link export
+  Results: see section 13 (verification log).
+  No frontend tests exist.
+
+6.8 Metrics / results: no ML metrics. "Confidence" is a heuristic 0-1 number.
+
+
+--------------------------------------------------------------------------------
+7. CONFIGURATION AND ENVIRONMENT
+--------------------------------------------------------------------------------
+backend/.env (names only; template is backend/.env.example):
+  GEMINI_API_KEY                    SECRET. Without it the app runs on fallbacks.
+  GEMINI_MODEL                      default gemini-2.5-flash
+  GEMINI_AGENT_DELAY_SECONDS        default 2.0 (sleep before each agent)
+  GEMINI_RATE_LIMIT_COOLDOWN_SECONDS default 60
+  DEBUG, HOST, PORT                 defaults True, 0.0.0.0, 8000
+  DEBUG_FORCE_SCENARIO              (in config.py, NOT in .env.example) ""|
+                                    "missing_repo"|"timeout". Debug hook that
+                                    forces recovery policies to trigger. Marked
+                                    in code "REMOVE BEFORE DEMO".
+frontend/.env (template frontend/.env.example):
+  VITE_USE_MOCKS   'true' = mock data; anything else = real backend
+  VITE_API_BASE    backend URL; code default http://localhost:8000
+Config files: vite.config.ts (port 5173), tsconfig.*, eslint.config.js.
+CORS: backend allows all origins, no credentials.
+Database: none to set up; SQLite file and tables are auto-created on first save.
+Other APIs: only Gemini. github_service.py is empty (no GitHub integration yet).
+NOTE: the backend reads .env relative to the working directory, so start it from
+inside backend/.
+
+
+--------------------------------------------------------------------------------
+8. SETUP AND RUN GUIDE (fresh clone)
+--------------------------------------------------------------------------------
+git clone https://github.com/kvlokeshkumar/aethermesh.git
+cd aethermesh
+
+# Backend
+cd backend
+python -m venv venv
+venv\Scripts\activate            (Windows)   |  source venv/bin/activate (mac/linux)
+pip install -r requirements.txt
+copy .env.example .env           (cp on mac/linux)
+#   edit .env and set GEMINI_API_KEY (optional - works without)
+python -m uvicorn app:app --reload --port 8000
+#   check http://localhost:8000/health   and  http://localhost:8000/docs
+
+# Tests (from backend/, same venv)
+pip install pytest
+python -m pytest -q
+#   Tip: set GEMINI_AGENT_DELAY_SECONDS=0 to make tests fast. /execute tests
+#   write rows into backend/aethermesh.db.
+
+# Frontend (new terminal)
+cd frontend
+copy .env.example .env           (cp on mac/linux)
+npm install                      (or npm ci)
+npm run dev                      # http://localhost:5173
+npm run build                    # tsc -b && vite build -> frontend/dist
+npm run lint
+
+Try prompts (from README): "Scan AWS Terraform infrastructure definitions for
+open S3 buckets and exposed IAM keys"; "Audit a Golang gRPC microservice for
+unhandled goroutine leaks and race conditions"; "Detect SQL injection
+vulnerabilities in legacy Express API endpoints"; "Diagnose the failing
+checkout-service CI pipeline and ship a fix".
+
+Force a recovery path for demos: start backend with DEBUG_FORCE_SCENARIO=
+missing_repo (or timeout).
+
+
+--------------------------------------------------------------------------------
+9. DEPLOYMENT / USAGE
+--------------------------------------------------------------------------------
+No Dockerfile, CI config or deployment scripts exist. It is run locally: uvicorn
+for the API, Vite dev server for the UI. State lives in process memory
+(_running_states, EventLogger) so it is single-process and lost on restart.
+
+Example API usage:
+  curl -X POST localhost:8000/execute/start -H "Content-Type: application/json" \
+       -d '{"task":"Detect SQL injection in an Express API"}'
+  -> {"workflow_id":"<uuid>","workflow":{"id":"<uuid>","nodes":[...],"edges":[...],...}}
+  curl -N localhost:8000/execute/<uuid>/stream
+  -> data: {"event":{"event_type":"agent_started",...},"state":{"status":"running",
+            "confidence":0.0,...}}   (one message per event, ends at workflow_completed)
+  curl localhost:8000/execute/<uuid>        # current ExecutionState
+  curl localhost:8000/replay/<uuid>         # {"workflow_id":..,"steps":[...]}
+  curl localhost:8000/history               # saved runs (SQLite)
+
+
+--------------------------------------------------------------------------------
+10. KNOWN BUGS, LIMITATIONS, DISCREPANCIES, TODOs
+--------------------------------------------------------------------------------
+Found by reading the code:
+ 1. The UI's run path (POST /execute/start) NEVER calls save_run(), so live runs
+    are not persisted to SQLite and GET /history does not return them. Only the
+    blocking POST /execute saves. The UI compensates with localStorage.
+    README's claim "Persists all runs in SQLite" is therefore only partly true.
+ 2. Human-in-the-loop is incomplete: ExecutionStatus.PAUSED_FOR_APPROVAL and the
+    approve endpoint exist, and the UI has Approve/Abort buttons, but NOTHING in
+    the backend ever sets status to paused_for_approval or blocks the engine
+    waiting for approval. Abort has no backend effect. README advertises this.
+ 3. security_auditor and sandbox_runner return fabricated "PASSED/SUCCESS"
+    template text; no real scanning or sandboxed execution occurs.
+ 4. coder and reviewer never use Gemini (deliberate, to save API calls), so
+    "generated code" is a scaffold/outline, not LLM-written.
+ 5. Default execution timeout is 120 s in code (policies/execution_timeout.py);
+    PROJECT_SUMMARY.md says 30 s. Also the timeout policy REMOVES the current
+    node after it already ran, so it shortens nothing in practice.
+ 6. PROJECT_SUMMARY.md is outdated: it says networkx is unused (it is used),
+    pins networkx==3.5 (file says >=3.2,<4), says the frontend mock flag is
+    "!== 'false'" (code is === 'true'), lists 5 agents and 4 policies (code has
+    12 agents, 5 policies), says PastRuns is mock-only (it now reads
+    localStorage + /history), and mentions a /graph route that is not routed.
+ 7. State is in-memory only (_running_states, EventLogger._event_store); the
+    in-memory dict grows without bound (no eviction).
+ 8. Failed agents are skipped, not retried; policies run only when an agent
+    succeeds.
+ 9. One mutation max per node (DecisionEngine picks a single winner).
+10. CORS is wide open (allow_origins=["*"]); no authentication on any endpoint.
+11. A task is sent verbatim into a Gemini prompt (prompt injection possible).
+12. Keyword matching in the default workflow is substring-based and crude.
+13. Debug hooks (DEBUG_FORCE_SCENARIO) remain in config.py, routes.py and
+    researcher_agent.py, marked "REMOVE BEFORE DEMO".
+14. Empty/stub files: services/github_service.py, utils/prompts.py,
+    policies/replay.py (placeholder comment only).
+15. bootstrap.py docstring says CriticAgent is "not yet integrated" - stale.
+16. Repo hygiene: .DS_Store and frontend/.env had been committed in the past
+    (history contains frontend/.env; values were only the two VITE_ names).
+17. One backend test FAILS: tests/test_policy_recovery.py::
+    test_low_confidence_policy_end_to_end_recovers. Cause: commit 88347de made
+    StateManager confidence a running mean over all agents, so a 0.9 planner +
+    0.30 researcher gives 0.60, which is above the 0.4 threshold and
+    LowConfidencePolicy never fires. The test is stale relative to the new
+    scoring. Side effect: LowConfidencePolicy is now hard to trigger in real
+    runs, because one weak agent is averaged away.
+Future ideas (from README/PROJECT_SUMMARY, not implemented): real run history
+API, real HITL pause/resume, durable event store, resume-from-offset SSE,
+branching workflows, GitHub repository integration.
+
+
+--------------------------------------------------------------------------------
+11. DECISIONS AND GOTCHAS
+--------------------------------------------------------------------------------
+ - Pydantic Workflow is the single source of truth; networkx graphs are rebuilt
+   on demand and thrown away.
+ - Policies never mutate anything; they return a RuntimeDecision. Only
+   StateManager mutates state; only MutationEngine mutates the workflow.
+ - Mutations are simulated on a copy first so a cycle can never be committed.
+ - Gemini calls are minimised (~1 workflow-plan call + planner + researcher +
+   evaluator [+ critic]) and throttled by a 2 s per-agent delay + a global 429
+   cooldown, because of free-tier rate limits (inferred from the code/comments).
+ - Every Gemini agent has a deterministic fallback, so the demo never hard-fails
+   without a key or under rate limiting.
+ - SSE listener registers before snapshotting events to avoid dropping the first
+   agent_started event (documented in routes.py comments); duplicates are
+   removed by event id.
+ - Frontend deliberately paces events at 700 ms/step for readability.
+ - The engine runs synchronously in a worker thread (asyncio.to_thread); event
+   listeners are called on that thread and marshalled back with
+   loop.call_soon_threadsafe.
+ - In offline mode the fallback researcher yields sources=1 and confidence 0.58,
+   so LowSourcesPolicy fires on almost every offline run (node "Gather more
+   sources" appears) - this is expected, not a bug.
+ - Start uvicorn from backend/ (imports are top-level, e.g. "from api.routes").
+ - Never commit .env files; use .env.example.
+
+
+--------------------------------------------------------------------------------
+12. OPEN QUESTIONS (could not be determined from the code)
+--------------------------------------------------------------------------------
+ - Contents/behaviour of debugger_agent, optimizer_agent, summarizer_agent and
+   analyst_agent were not read in full; they may also be template-based like
+   security_auditor.
+ - Whether the project is still actively developed or what the hackathon result
+   was (README gives no result).
+ - Intended real implementation of HITL pausing (which policies are "high-risk").
+ - Whether DEBUG_FORCE_SCENARIO hooks were removed for the final demo.
+ - Which remote is the canonical upstream: git remotes pointed at
+   someone1644/aethermesh and someone1644/aethermesh-backup (teammate repos);
+   this backup lives at github.com/kvlokeshkumar/aethermesh.
+ - Exact Python minimum version (README says 3.10+; only 3.12 was tested here).
+ - Whether the frontend lint passes (not run).
+
+
+--------------------------------------------------------------------------------
+13. VERIFICATION LOG
+--------------------------------------------------------------------------------
+Backend tests, run on a clean export of the committed files, Python 3.12.10,
+fresh venv from requirements.txt + pytest, GEMINI_API_KEY empty,
+GEMINI_AGENT_DELAY_SECONDS=0:
+    17 tests collected: 16 passed, 1 failed (see section 10 item 17).
+    pip install -r requirements.txt succeeded.
+Frontend install/build and clone-vs-local comparison: see "Backup verification"
+below if present.

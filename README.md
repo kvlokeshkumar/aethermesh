@@ -1,3 +1,5 @@
+> **Full project knowledge base:** see [PROJECT_KNOWLEDGE.txt](PROJECT_KNOWLEDGE.txt) - architecture, workflow, setup, configuration, known issues and gotchas, written so a new contributor (or a fresh AI session) can understand and rebuild the project.
+
 # 🕸️ AetherMesh — Adaptive Multi-Agent AI Runtime Kernel
 
 > **Ctrl Alt Defeat** | Hackathon Entry  
