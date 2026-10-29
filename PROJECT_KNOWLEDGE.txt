@@ -467,6 +467,16 @@ Found by reading the code:
     LowConfidencePolicy never fires. The test is stale relative to the new
     scoring. Side effect: LowConfidencePolicy is now hard to trigger in real
     runs, because one weak agent is averaged away.
+18. FRONTEND BUILD FAILS: `npm run build` (tsc -b && vite build) stops with
+    TS2322 at src/components/workflow/WorkflowCanvas.tsx(140,11):
+    ReactFlowInstance<Node<WorkflowNodeData>, Edge> is not assignable to
+    ReactFlowInstance. Reproduced on a fresh clone AND in the original local
+    tree, so it predates the backup. `npm run dev` (Vite) is unaffected
+    because it does not type-check. frontend/dist is therefore not
+    reproducible until this is fixed.
+19. frontend/tsconfig.app.tsbuildinfo and tsconfig.node.tsbuildinfo are
+    committed build caches; they change on every build and should be
+    git-ignored.
 Future ideas (from README/PROJECT_SUMMARY, not implemented): real run history
 API, real HITL pause/resume, durable event store, resume-from-offset SSE,
 branching workflows, GitHub repository integration.
@@ -524,5 +534,14 @@ fresh venv from requirements.txt + pytest, GEMINI_API_KEY empty,
 GEMINI_AGENT_DELAY_SECONDS=0:
     17 tests collected: 16 passed, 1 failed (see section 10 item 17).
     pip install -r requirements.txt succeeded.
-Frontend install/build and clone-vs-local comparison: see "Backup verification"
-below if present.
+
+Backup verification (clone of github.com/kvlokeshkumar/aethermesh, branch main,
+commit f236e9b):
+    Tracked files: 122 local vs 122 in clone. HEAD hashes identical.
+    SHA-256 of every tracked file compared: all identical once CR/LF line
+    endings are ignored (Windows checkout converts LF->CRLF). The only content
+    difference was tsconfig.app.tsbuildinfo, rewritten by the clone's own build.
+    No .env file is tracked in the clone.
+    frontend: `npm ci` OK (220 packages). `npm run build` FAILS on the TS error
+    in section 10 item 18 (also fails locally; not caused by the backup).
+    backend: `pip install -r requirements.txt` OK; tests 16 pass / 1 fail.
